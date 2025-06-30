@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <title>🌊农业巡检实时画面显示🌊</title>
+
+    <!-- 外部样式 -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/water.css@2/out/water.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&display=swap');
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: linear-gradient(135deg, #1a1a2e, #16213e);
+            font-family: 'Orbitron', sans-serif;
+            color: #fff;
+            height: 100vh;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        header {
+            position: absolute;
+            top: 20px;
+            width: 100%;
+            text-align: center;
+        }
+
+        main {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            z-index: 1;
+        }
+
+        .title {
+            font-size: 2.5rem;
+            margin-bottom: 2rem;
+            text-shadow: 0 0 10px rgba(0, 255, 255, 0.7);
+            letter-spacing: 2px;
+        }
+
+        .project-info {
+            max-width: 640px;
+            background: rgba(255, 255, 255, 0.05);
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 2rem;
+            box-shadow: 0 0 10px rgba(0, 255, 255, 0.3);
+            font-size: 1rem;
+            line-height: 1.6;
+        }
+
+        .video-container {
+            position: relative;
+            width: 640px;
+            height: 480px;
+            margin: 0 auto;
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 0 20px rgba(0, 255, 255, 0.5);
+            border: 2px solid #00ffff;
+        }
+
+        #overlay-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            pointer-events: none;
+        }
+
+        .btn-switch {
+            margin-top: 2rem;
+            padding: 15px 30px;
+            font-size: 1.2rem;
+            font-family: 'Orbitron', sans-serif;
+            background: linear-gradient(45deg, #00ffff, #0088ff);
+            color: #fff;
+            border: none;
+            border-radius: 50px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 0 15px rgba(0, 255, 255, 0.5);
+            position: relative;
+            overflow: hidden;
+            z-index: 1;
+        }
+
+        .btn-switch:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 0 25px rgba(0, 255, 255, 0.8);
+        }
+
+        .btn-switch::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+            transition: 0.5s;
+            z-index: -1;
+        }
+
+        .btn-switch:hover::before {
+            left: 100%;
+        }
+
+        .particles {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+        }
+
+        .particle {
+            position: absolute;
+            background: rgba(0, 255, 255, 0.5);
+            border-radius: 50%;
+            pointer-events: none;
+        }
+
+        @keyframes float {
+            0% { transform: translateY(0) rotate(0deg); }
+            100% { transform: translateY(-100vh) rotate(360deg); }
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0.5; transform: scale(0.95); }
+            to { opacity: 1; transform: scale(1); }
+        }
+
+        /* 点击特效 */
+        .click-effect {
+            position: fixed;
+            top: 0;
+            left: 0;
+            pointer-events: none;
+            z-index: 9999;
+            font-family: 'Orbitron', sans-serif;
+            font-size: 18px;
+            color: #00ffff;
+            text-shadow: 0 0 5px rgba(0, 255, 255, 0.7);
+            user-select: none;
+            animation: clickEffectAnim 1s ease-out forwards;
+        }
+
+        @keyframes clickEffectAnim {
+            0% {
+                opacity: 1;
+                transform: scale(1) translateY(0);
+            }
+            100% {
+                opacity: 0;
+                transform: scale(1.5) translateY(-40px);
+            }
+        }
+    </style>
+</head>
+<body>
+    <!-- 背景粒子 -->
+    <div class="particles" id="particles"></div>
+
+    <!-- 点击特效 -->
+    <div id="click-effect" class="click-effect"></div>
+
+    <!-- 头部 -->
+    <header>
+        <h1 class="title">🌊 AI农业巡检机器人 🌾</h1>
+    </header>
+
+    <!-- 内容主体 -->
+    <main>
+        <!-- 项目介绍 -->
+        <aside class="project-info">
+            <h2>🌾 项目背景</h2>
+            <p>本系统为农业巡检机器人远程控制系统，支持实时视频画面查看与摄像头切换功能。</p>
+            <p>通过Web端可对部署在田间的巡检机器人进行远程监控，提升农业自动化水平与管理效率。</p>
+        </aside>
+
+        <!-- 视频区域 -->
+        <div class="video-container">
+            <video id="video-stream" autoplay muted playsinline></video>
+            <canvas id="overlay-canvas" width="640" height="480"></canvas>
+        </div>
+
+        <!-- 控制按钮 -->
+        <button class="btn-switch" onclick="switchCamera()">
+            <span><i class="fas fa-sync-alt"></i> 切换摄像头</span>
+        </button>
+    </main>
+
+    <!-- 脚本 -->
+    <script>
+        // 点击特效
+        document.addEventListener('click', function(e) {
+            const effect = document.getElementById('click-effect');
+            effect.style.top = `${e.clientY}px`;
+            effect.style.left = `${e.clientX}px`;
+            effect.textContent = ['🌱', '🌾', '🤖', '📡', '💧'][Math.floor(Math.random() * 5)];
+            effect.style.opacity = '1';
+            effect.style.transform = 'scale(1) translateY(0)';
+        });
+
+        // 创建粒子
+        function createParticles() {
+            const particlesContainer = document.getElementById('particles');
+            const particleCount = Math.floor(window.innerWidth / 30);
+
+            for (let i = 0; i < particleCount; i++) {
+                const particle = document.createElement('div');
+                particle.classList.add('particle');
+
+                const size = Math.random() * 5 + 2;
+                const posX = Math.random() * window.innerWidth;
+                const duration = Math.random() * 15 + 10;
+                const delay = Math.random() * 5;
+
+                particle.style.width = `${size}px`;
+                particle.style.height = `${size}px`;
+                particle.style.left = `${posX}px`;
+                particle.style.bottom = `-${size}px`;
+                particle.style.opacity = Math.random() * 0.5 + 0.1;
+                particle.style.animation = `float ${duration}s linear ${delay}s infinite`;
+
+                particlesContainer.appendChild(particle);
+            }
+        }
+
+        // 加载 MJPEG 视频流到 video 元素
+        const video = document.getElementById('video-stream');
+        video.srcObject = null;
+        video.src = "{{ url_for('video_feed') }}";
+
+        // 在 canvas 上绘制 OpenCV 风格的文字（模拟）
+        const canvas = document.getElementById('overlay-canvas');
+        const ctx = canvas.getContext('2d');
+
+        function drawOverlayText() {
+            ctx.clearRect(0, 0, 640, 480);
+            ctx.font = "bold 20px Orbitron";
+            ctx.fillStyle = "#00ffff";
+            ctx.textAlign = "left";
+            ctx.fillText("AI 巡检中...", 20, 40);
+            ctx.fillText("FPS: 15", 20, 70);
+            ctx.fillText("Battery: 85%", 20, 100);
+        }
+
+        setInterval(drawOverlayText, 1000 / 15); // 每秒刷新15次
+
+        // 切换摄像头
+        function switchCamera() {
+            const btn = document.querySelector('.btn-switch');
+            btn.disabled = true;
+            btn.innerHTML = '<span><i class="fas fa-spinner fa-spin"></i> 切换中...</span>';
+
+            fetch("/switch_camera", { method: "POST" })
+                .then(response => {
+                    if (response.ok) {
+                        const videoContainer = document.querySelector('.video-container');
+                        videoContainer.style.animation = 'none';
+                        void videoContainer.offsetWidth;
+                        videoContainer.style.animation = 'fadeIn 0.5s';
+
+                        video.src = "{{ url_for('video_feed') }}" + "?t=" + new Date().getTime();
+                    }
+                })
+                .catch(err => console.error("切换失败:", err))
+                .finally(() => {
+                    setTimeout(() => {
+                        btn.disabled = false;
+                        btn.innerHTML = '<span><i class="fas fa-sync-alt"></i> 切换摄像头</span>';
+                    }, 1000);
+                });
+        }
+
+        // 页面加载完成后创建粒子
+        window.addEventListener('load', createParticles);
+    </script>
+</body>
+</html>
