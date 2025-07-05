@@ -1,4 +1,4 @@
-import os #app4.py
+import os #app4.py 实现基本功能版-20250704
 from flask import Flask, render_template, Response
 import cv2
 import cv2
@@ -9,6 +9,7 @@ from hobot_dnn import pyeasy_dnn as dnn  # BSP Python API
 import time
 import argparse
 import logging 
+from collections import deque
 
 import cv2
 import numpy as np
@@ -53,6 +54,10 @@ device_state = {
     "last_position": None  # 上一次物体位置
 }
 
+# 用于存储最近的状态检测结果
+state_history = deque(maxlen=20)  # 存储最近20次检测结果（约1秒数据）
+state_change_threshold = 0.80      # 95%的检测结果一致才认为状态改变
+
 def update_device_state(pump, motor, direction):
     """更新设备状态并发送到串口"""
     global device_state
@@ -68,6 +73,29 @@ def update_device_state(pump, motor, direction):
             "last_position": device_state["last_position"]
         }
         logger.info(f"Device State Updated - PUMP:{pump} MOTOR:{motor} DIR:{direction}")
+
+# ========== 状态滤波函数 ==========
+def filter_state(current_state):
+    """应用状态滤波，确保状态稳定后再更新"""
+    global state_history
+    
+    # 添加当前状态到历史记录
+    state_history.append(current_state)
+    
+    # 如果历史记录不足，不更新状态
+    if len(state_history) < 5:
+        return current_state
+    
+    # 计算当前状态在历史记录中的比例
+    state_count = sum(1 for state in state_history if state == current_state)
+    state_ratio = state_count / len(state_history)
+    
+    # 如果比例超过阈值，认为状态稳定
+    if state_ratio >= state_change_threshold:
+        return current_state
+    
+    # 状态不稳定，保持原状态
+    return device_state.get('last_position')
 
 def analyze_position(frame, bboxes, scores):
     """分析物体位置并返回位置状态"""
@@ -407,17 +435,19 @@ def infer_once(frame):
     ids,scores,bboxes=post_process(outputs,[s_anchor,m_anchor,l_anchor],strides,weights_static)
     return ids,scores,bboxes
 
-def analysis_results(ids,scores,bboxes):
-    results=[]
-    for index,bbox in enumerate(bboxes):
-        x_min,y_min,x_max,y_max=bbox
-        center=((x_min+x_max)/2-320,320-(y_min+y_max)/2)
-        width=x_max-x_min
-        height=y_max-y_min
-        score=scores[index]
-        id=ids[index]
-        results.append([id,center,width,height,score])
+def analysis_results(ids, scores, bboxes):
+    results = []
+    for index, bbox in enumerate(bboxes):
+        x_min, y_min, x_max, y_max = bbox
+        # 存储原始边界框坐标，用于位置判断
+        width = x_max - x_min
+        height = y_max - y_min
+        score = scores[index]
+        id = ids[index]
+        # 存储边界框坐标而不是中心点
+        results.append([id, (x_min, y_min, x_max, y_max), width, height, score])
     return results
+
 def draw_results(frame, ids, scores, bboxes, color=(0, 255, 0), thickness=2):
     """
     在图像上绘制目标检测的结果，包括边框、类别ID和得分。
@@ -531,13 +561,30 @@ using_second_camera = False
 # 用于记录最后拍照时间
 last_photo_time = time.time()
 
-# 创建imgs文件夹
-if not os.path.exists('imgs'):
-    os.makedirs('imgs')
+def create_img_folder():
+    """创建图片保存文件夹，如果imgs存在则创建imgs_1, imgs_2等"""
+    base_name = "imgs"
+    folder_name = base_name
+    counter = 1
+    
+    while os.path.exists(folder_name):
+        folder_name = f"{base_name}_{counter}"
+        counter += 1
+    
+    os.makedirs(folder_name)
+    return folder_name
+
+# 创建图片保存文件夹
+img_folder = create_img_folder()
 
 def gen_frames():
-    global camera, device_state, photo_counter, last_photo_time
+    global camera, device_state, photo_counter, last_photo_time, img_folder
     
+    # 目标跟踪变量
+    current_target = None  # 当前跟踪的目标
+    target_lost_counter = 0  # 目标丢失计数器
+    MAX_LOST_FRAMES = 10  # 最大丢失帧数（约0.1秒）
+
     while True:
         with camera_lock:
             if not camera or not camera.isOpened():
@@ -548,50 +595,105 @@ def gen_frames():
             continue
 
         # 图像处理
-        frame=preprocess(frame)
-        ids,scores,bboxes=infer_once(frame)
-        results=analysis_results(ids,scores,bboxes)
-        frame=draw_results(frame,ids,scores,bboxes)
+        frame = preprocess(frame)
+        ids, scores, bboxes = infer_once(frame)
+        results = analysis_results(ids, scores, bboxes)
+        frame = draw_results(frame, ids, scores, bboxes)
 
+        # 获取当前帧置信度最高的物体
+        highest_confidence_result = get_highest_confidence_result(results) if results else None
+
+        # 更新当前跟踪目标
+        if highest_confidence_result:
+            # 如果有新的高置信度目标，更新跟踪目标
+            current_target = highest_confidence_result
+            target_lost_counter = 0
+        elif current_target:
+            # 如果没有检测到高置信度目标，但之前有跟踪目标，增加丢失计数器
+            target_lost_counter += 1
+            if target_lost_counter >= MAX_LOST_FRAMES:
+                # 如果连续丢失多帧，重置目标
+                current_target = None
+                target_lost_counter = 0
+        
         # 位置分析和设备控制
-        current_position = analyze_position(frame, bboxes, scores)
-
-        if current_position:
-            # 在画面上显示位置信息
-            cv2.putText(frame, f"Position: {current_position}", (10, 30), 
+        current_position = None
+        if current_target:
+            # 直接从current_target获取边界框信息
+            # current_target结构：[id, (x_min, y_min, x_max, y_max), width, height, score]
+            x_min, y_min, x_max, y_max = current_target[1]  # 边界框坐标
+            frame_height = frame.shape[0]
+            
+            # 定义中间区域边界
+            middle_upper = frame_height * 0.3  # 上边界为30%
+            middle_lower = frame_height * 0.7  # 下边界为70%
+            
+            # 位置判断（使用原始图像坐标）
+            # 整个框在中间区域：上边界 >= 30% 且 下边界 <= 70%
+            if y_min >= middle_upper and y_max <= middle_lower:
+                current_position = 'middle'
+            # 上边界在上区域：y_min < 30%
+            elif y_min < middle_upper:
+                current_position = 'up'
+            # 下边界在下区域：y_max > 70%
+            elif y_max > middle_lower:
+                current_position = 'down'
+            
+            # 在画面上显示跟踪目标信息
+            id, bbox, width, height, score = current_target
+            cv2.putText(frame, f"Tracking: ID={id} Score={score:.2f}", (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+            # 显示目标位置
+            cv2.putText(frame, f"Position: {current_position if current_position else 'unknown'}", (10, 60), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        
+        # 应用状态滤波
+        filtered_position = filter_state(current_position) if current_position is not None else None
+        
+        if filtered_position:
+            # 在画面上显示滤波后的位置信息
+            cv2.putText(frame, f"Filtered Position: {filtered_position}", (10, 90), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
             
             # 根据位置更新设备状态
-            if current_position == 'up':
+            if filtered_position == 'up':
                 update_device_state(0, 1, 1)  # PUMP_OFF, MOTOR_ON, DIRECTION_UP
+                logger.info(f"UP position detected - bbox: ({x_min}, {y_min}, {x_max}, {y_max})")
             
-            elif current_position == 'down':
+            elif filtered_position == 'down':
                 update_device_state(0, 1, 0)  # PUMP_OFF, MOTOR_ON, DIRECTION_DOWN
+                logger.info(f"DOWN position detected - bbox: ({x_min}, {y_min}, {x_max}, {y_max})")
             
-            elif current_position == 'middle':
+            elif filtered_position == 'middle':
                 # 只有从上下方向进入中间区域时才开启水泵
                 if device_state["last_position"] in ['up', 'down']:
                     update_device_state(1, 0, device_state["direction"])  # PUMP_ON, MOTOR_OFF
+                    logger.info(f"MIDDLE position detected - bbox: ({x_min}, {y_min}, {x_max}, {y_max})")
             
             # 更新最后位置状态
-            device_state["last_position"] = current_position
+            device_state["last_position"] = filtered_position
         
         else:
-            # 没有检测到物体时停止所有设备
+            # 没有检测到目标或目标丢失时停止所有设备
             if device_state["motor"] == 1 or device_state["pump"] == 1:
                 update_device_state(0, 0, 0)  # 全部停止
+                logger.info("No target detected - stopping all devices")
             
-            cv2.putText(frame, "No object detected", (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+            if not current_target:
+                cv2.putText(frame, "No object detected", (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+            else:
+                cv2.putText(frame, "Position unknown", (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
         
         # 显示当前设备状态
         state_text = f"State: Motor={device_state['motor']} Dir={device_state['direction']} Pump={device_state['pump']}"
-        cv2.putText(frame, state_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
+        cv2.putText(frame, state_text, (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
 
         # 第二个摄像头定时拍照功能
         if using_second_camera and time.time() - last_photo_time > 5:  # 每5秒拍一次照
             with camera_lock:  # 确保线程安全
-                photo_path = os.path.join('imgs', f'result_{photo_counter}.jpg')
+                photo_path = os.path.join(img_folder, f'img_{photo_counter}.jpg')
                 cv2.imwrite(photo_path, frame)
                 photo_counter += 1
                 last_photo_time = time.time()
@@ -604,11 +706,10 @@ def gen_frames():
 
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-
-
+               
 @app.route('/')
 def index():
-    return render_template('index3.html')
+    return render_template('index4.html')
 
 
 @app.route('/video_feed')
